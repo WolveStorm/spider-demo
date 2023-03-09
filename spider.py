@@ -4,8 +4,7 @@ from model.redis_m import rclient
 from model.postgres import GameInfo
 from model.mongo import collection
 from apk_fetch.apk_fetch import get_apk_url
-
-
+from requests.adapters import HTTPAdapter
 import requests
 import re
 from bs4 import BeautifulSoup
@@ -21,7 +20,9 @@ download_apk_url = "https://apkcombo.com/de-de/apk-downloader/?device=&arches=&s
 count = 0
 # apk下载的路径
 apk_path = "/tmp/pycharm_project_176/apk"
-
+s = requests.Session()
+s.mount('http://', HTTPAdapter(max_retries=3))
+s.mount('https://', HTTPAdapter(max_retries=3))
 # 下载n个apk
 download_times = 0
 # 下载线程列表
@@ -29,13 +30,84 @@ download_threads = []
 # 游戏列表
 game_mongo_list = []
 game_post_list = []
+# 代理
+proxys = {
+    "http": "http://0.0.0.0:7890"
+}
+
+
+def consumer_func(game_url, pkg_name,game_mongo_list,game_post_list):
+    try:
+        r = s.get(game_url, headers=header,proxies=proxys)
+        # 游戏详情的响应
+        detail_resp = r.text
+        # 解析
+        soup1 = BeautifulSoup(detail_resp, "html.parser")
+        games_map = {}
+        post_games_map = {}
+        # 解析游戏名称
+        name_soup = soup1.find_all(name='h1', attrs={"itemprop": "name"})
+        game_name = re.findall("<span>(.*?)</span>", str(name_soup[0]))[0]
+        games_map["name"] = game_name
+        post_games_map["name"] = game_name
+        # 解析游戏图片
+        avatar_soup = soup1.find_all(name='img', attrs={"class": "T75of cN0oRe fFmL2e"})[0]
+        post_games_map["avatar_url"] = avatar_soup['src']
+        games_map["avatar"] = avatar_soup['src']
+        # 解析游戏出版公司
+        company_soup = soup1.find_all(name='div', attrs={"class": "Vbfug auoIOc"})
+        games_map["company"] = re.findall("<span>(.*?)</span>", str(company_soup[0]))[0]
+        post_games_map["company"] = re.findall("<span>(.*?)</span>", str(company_soup[0]))[0]
+        # 解析游戏评分
+        score_soup = soup1.find_all(name='div', attrs={"class": "TT9eCd"})
+        games_map["score"] = score_soup[0]['aria-label']
+        post_games_map["score"] = score_soup[0]['aria-label']
+        # 解析下载次数
+        download_soup = soup1.find_all(name='div', attrs={"class": "ClM7O"})
+        games_map["download_times"] = re.findall(">(.*?)<", str(download_soup[1]))[0]
+        post_games_map["download_times"] = re.findall(">(.*?)<", str(download_soup[1]))[0]
+        # 解析游戏简介
+        desc_soup = soup1.find_all(name='div', attrs={"class": "bARER"})[0]
+        games_map["description"] = desc_soup.text
+        post_games_map["description"] = desc_soup.text
+        # 解析并下载apk包
+        apk_url = get_apk_url(pkg_name)
+        games_map["apk_url"] = apk_url
+        post_games_map["apk_url"] = apk_url
+        # 存储到数据库
+        game_mongo_list.append(games_map)
+        game_post_list.append(post_games_map)
+        # collection.insert_one(game    s_map)
+        # g_info.save()
+    except Exception as e:
+        print(e)
+        print("爬取出现错误")
+
+
+def fetch_google_urls():
+    url = "https://play.google.com/store/games"
+    # 伪装header
+    r = s.get(url, headers=header, proxies=proxys)
+    # 游戏页的响应
+    index_resp = r.text
+    # 解析
+    soup1 = BeautifulSoup(index_resp, "html.parser")
+    game_infos = soup1.find_all(name="a", attrs={"class": "Si6A0c Gy4nib"})
+    url_list = []
+    for info in game_infos:
+        # 得到游戏详情页的url
+        game_detail_url = google_base_url + info['href']
+        if rclient.sadd("url_set", game_detail_url) != 1:
+            continue
+        url_list.append(game_detail_url)
+    return url_list
 
 def do_google_spider():
     global download_threads
     print("开始爬虫")
     url = "https://play.google.com/store/games"
     # 伪装header
-    r = requests.get(url, headers=header)
+    r = s.get(url, headers=header,proxies=proxys)
     # 游戏页的响应
     index_resp = r.text
     # 解析
@@ -50,8 +122,11 @@ def do_google_spider():
             continue
         print(f"开始爬取,url:{game_detail_url} ,apk包名:{pkg_name}")
         game_spider(game_detail_url, pkg_name)
-    collection.insert_many(game_mongo_list)
-    GameInfo.insert_many(game_post_list, fields=[GameInfo.name, GameInfo.apk_url, GameInfo.avatar_url, GameInfo.score, GameInfo.company, GameInfo.description, GameInfo.download_times]).execute()
+    if count != 0:
+        collection.insert_many(game_mongo_list)
+        GameInfo.insert_many(game_post_list, fields=[GameInfo.name, GameInfo.apk_url, GameInfo.avatar_url, GameInfo.score, GameInfo.company, GameInfo.description, GameInfo.download_times]).execute()
+    # 删掉缓存
+    rclient.delete("kv:game_list:")
     for t in download_threads:
         t.join()
     print(f"爬虫结束,总共爬取{count}条数据,下载了{len(download_threads)}个apk包")
@@ -62,8 +137,9 @@ def game_spider(game_url, pkg_name):
     global download_times
     global download_threads
     global game_mongo_list
+    global game_post_list
     try:
-        r = requests.get(game_url, headers=header)
+        r = s.get(game_url, headers=header,proxies=proxys)
         # 游戏详情的响应
         detail_resp = r.text
         # 解析
@@ -116,7 +192,7 @@ def game_spider(game_url, pkg_name):
         # 存储到数据库
         game_mongo_list.append(games_map)
         game_post_list.append(post_games_map)
-        # collection.insert_one(games_map)
+        # collection.insert_one(game    s_map)
         # g_info.save()
         count += 1
     except Exception as e:
@@ -127,7 +203,7 @@ def download_apk(download_url,apk_name):
     download_header = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_4) AppleWebKit/605.1.15      (KHTML, like Gecko) Version/13.1 Safari/605.1.15',
     }
-    r = requests.get(url=download_url, headers=download_header)
+    r = s.get(url=download_url, headers=download_header,proxies=proxys)
 
     f_path = os.path.join(apk_path,apk_name+".apk")
 

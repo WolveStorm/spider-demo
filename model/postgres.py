@@ -12,7 +12,7 @@ class BaseModel(Model):
 
 
 class GameInfo(BaseModel):
-    name = CharField()
+    name = CharField(index=True)
     avatar_url = CharField()
     company = CharField()
     score = CharField()
